@@ -1,0 +1,89 @@
+- name: Create security group, an instance and Deploy the application
+  hosts: localhost
+  gather_facts: False
+  
+  vars:
+    key_name: my_keypair
+    instance_type: t2.micro
+    security_group: test_security_group
+    image: ami-7172b611
+    region: us-west-2
+  
+  tasks:
+   - name: Test Ec2 security group
+     ec2_group:
+      name: Test Security Group
+      vpc_id: 12345
+      region: eu-west-2a
+      aws_secret_key: SECRET
+      aws_access_key: ACCESS
+      rules:
+      - proto: tcp
+        from_port: 80
+        to_port: 80
+        cidr_ip: 0.0.0.0/0
+     
+      - proto: tcp
+        from_port: 443
+        to_port: 443
+        group_id: amazon-elb/sg-87654321/amazon-elb-sg
+      - proto: tcp
+        from_port: 3306
+        to_port: 3306
+        group_id: 123412341234/sg-87654321/exact-name-of-sg
+      
+      rules_egress:
+      - proto: tcp
+        from_port: 80
+        to_port: 80
+        cidr_ip: 0.0.0.0/0
+        group_name: test_security_group 
+
+  # Forward port 80 to 443
+    - iptables: table=nat chain=PREROUTING in_interface=eth0 protocol=tcp match=tcp destination_port=80 jump=REDIRECT to_ports=443 comment="Redirect web traffic to port 8600"
+      become: yes
+
+      # Allow related and established connections
+    - iptables: chain=INPUT ctstate=ESTABLISHED,RELATED jump=ACCEPT
+      become: yes
+
+	# To create an EC2 instance
+	- name: Launch instance
+      ec2:
+         key_name: "{{ key_name }}"
+         group: "{{ security_group }}"
+         instance_type: "{{ instance_type }}"
+         image: "{{ image }}"
+         wait: true
+         region: "{{ region }}"
+         vpc_subnet_id: subnet-29e63245
+         assign_public_ip: yes
+      register: ec2
+	  
+	  # To add the new instance to host group
+    - name: Add new instance to host group
+      add_host: hostname={{ item.public_ip }} groupname=launched
+      with_items: ec2.instances
+	  
+	  #To establish the ssh connection with EC2 instance
+    - name: Wait for SSH to come up
+      wait_for: host={{ item.public_dns_name }} port=22 delay=60 timeout=320 state=started
+      with_items: ec2.instances
+	  
+	  #Install the apache application
+	- name: install httpd package
+	  yum: name=httpd state=installed
+	  notify: start httpd service
+	  
+      #Copy the source file to target system
+	  - name: copy the index.html 
+	  copy: src=index.html dest=/usr/www/html/index.html
+	 
+      #Start the apache service	 
+	- name: start the httpd service
+	  service: name=httpd state=restarted
+	  
+      # Test the code by using Curl and echo $?	  
+	- name: test the application by using curl
+	  cmd: curl "http://{{ item.public_dns_name }}" | echo $?
+     # If the exit code comes 0 then the application deployed successfully  
